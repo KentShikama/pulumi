@@ -219,7 +219,8 @@ func (mod *modContext) genHeader(w io.Writer, needsSDK, needsJSON bool, imports 
 		fmt.Fprintf(w, "import warnings\n")
 		fmt.Fprintf(w, "import pulumi\n")
 		fmt.Fprintf(w, "import pulumi.runtime\n")
-		fmt.Fprintf(w, "from typing import Any, Dict, List, Mapping, Optional, Tuple, Union\n")
+		fmt.Fprintf(w, "from typing import Any, Dict, List, Mapping, Optional, Tuple, Union, overload\n")
+		fmt.Fprintf(w, "from dataclasses import dataclass\n")
 		fmt.Fprintf(w, "from %s import _utilities, _tables\n", relImport)
 		for _, imp := range imports.strings() {
 			fmt.Fprintf(w, "%s\n", imp)
@@ -698,7 +699,14 @@ func (mod *modContext) genResource(res *schema.Resource) (string, error) {
 	}
 
 	// Export only the symbols we want exported.
-	fmt.Fprintf(w, "__all__ = ['%s']\n\n", name)
+	fmt.Fprintf(w, "__all__ = ['%s', '%sArgs']\n\n", name, name)
+
+	fmt.Fprintf(w, "@dataclass\nclass %sArgs:\n", name)
+	for _, prop := range res.InputProperties {
+		ty := mod.typeString(prop.Type, true, true, true /*optional*/, true /*acceptMapping*/)
+		fmt.Fprintf(w, "    %s: %s = None\n", InitParamName(prop.Name), ty)
+	}
+	fmt.Fprint(w, "\n")
 
 	baseType := "pulumi.CustomResource"
 	if res.IsProvider {
@@ -717,7 +725,16 @@ func (mod *modContext) genResource(res *schema.Resource) (string, error) {
 		escaped := strings.ReplaceAll(res.DeprecationMessage, `"`, `\"`)
 		fmt.Fprintf(w, "    warnings.warn(\"%s\", DeprecationWarning)\n\n", escaped)
 	}
+
+	fmt.Fprintf(w, "    @overload\n")
+	fmt.Fprintf(w, "    def __init__(__self__,\n")
+	fmt.Fprintf(w, "                 resource_name,\n")
+	fmt.Fprintf(w, "                 args: Optional[%sArgs] = None,\n", name)
+	fmt.Fprintf(w, "                 opts: Optional[pulumi.ResourceOptions] = None):\n")
+	fmt.Fprintf(w, "        ...\n\n")
+
 	// Now generate an initializer with arguments for all input properties.
+	fmt.Fprintf(w, "    @overload\n")
 	fmt.Fprintf(w, "    def __init__(__self__,\n")
 	fmt.Fprintf(w, "                 resource_name,\n")
 	fmt.Fprintf(w, "                 opts: Optional[pulumi.ResourceOptions] = None")
@@ -734,6 +751,40 @@ func (mod *modContext) genResource(res *schema.Resource) (string, error) {
 	fmt.Fprintf(w, ",\n                 __name__=None")
 	fmt.Fprintf(w, ",\n                 __opts__=None):\n")
 	mod.genInitDocstring(w, res)
+	fmt.Fprintf(w, "        ...\n\n")
+
+	fmt.Fprintf(w, "    def __init__(__self__, resource_name, *args, **kwargs):\n")
+	fmt.Fprintf(w, "        def _get_input_args(args, args_name):\n")
+	fmt.Fprintf(w, "            if len(args) >= 1:\n")
+	fmt.Fprintf(w, "                input_args = args[0]\n")
+	fmt.Fprintf(w, "                return input_args, args[1:]\n")
+	fmt.Fprintf(w, "            else:\n")
+	fmt.Fprintf(w, "                input_args = kwargs.get(args_name)\n")
+	fmt.Fprintf(w, "                return input_args, args\n")
+	fmt.Fprintf(w, "        input_args, args_tail = _get_input_args(args, 'args')\n")
+	fmt.Fprintf(w, "        opts_args, args_tail = _get_input_args(args_tail, 'opts')\n")
+	fmt.Fprintf(w, "        is_input_args = isinstance(input_args, %sArgs)\n", name)
+	fmt.Fprintf(w, "        is_opts_args = isinstance(opts_args, pulumi.ResourceOptions)\n")
+	fmt.Fprintf(w, "        if not args_tail and (is_input_args or is_opts_args):\n")
+	fmt.Fprintf(w, "            __self__._internal_init__(resource_name,\n")
+	fmt.Fprintf(w, "                                      opts_args")
+	for _, prop := range res.InputProperties {
+		fmt.Fprintf(w, ",\n                                      input_args.%s", InitParamName(prop.Name))
+	}
+	fmt.Fprintf(w, ")\n")
+	fmt.Fprintf(w, "        else:\n")
+	fmt.Fprintf(w, "            __self__._internal_init__(resource_name, *args, **kwargs)\n\n")
+
+	fmt.Fprintf(w, "    def _internal_init__(__self__,\n")
+	fmt.Fprintf(w, "                          resource_name,\n")
+	fmt.Fprintf(w, "                          opts: Optional[pulumi.ResourceOptions] = None")
+	for _, prop := range res.InputProperties {
+		ty := mod.typeString(prop.Type, true, true, true /*optional*/, true /*acceptMapping*/)
+		fmt.Fprintf(w, ",\n                          %s: %s = None", InitParamName(prop.Name), ty)
+	}
+	fmt.Fprintf(w, ",\n                          __props__=None")
+	fmt.Fprintf(w, ",\n                          __name__=None")
+	fmt.Fprintf(w, ",\n                          __opts__=None):\n")
 	if res.DeprecationMessage != "" && mod.compatibility != kubernetes20 {
 		fmt.Fprintf(w, "        pulumi.log.warn(\"%s is deprecated: %s\")\n", name, res.DeprecationMessage)
 	}
